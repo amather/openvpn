@@ -90,6 +90,9 @@ const char title_string[] =
 #if EPOLL
     " [EPOLL]"
 #endif
+#if KQUEUE
+    " [KQUEUE]"
+#endif
 #ifdef PRODUCT_TAP_DEBUG
     " [TAPDBG]"
 #endif

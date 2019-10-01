@@ -186,6 +186,10 @@
 #include <sys/epoll.h>
 #endif
 
+#ifdef HAVE_SYS_EVENT_H
+#include <sys/event.h>
+#endif
+
 #ifdef ENABLE_SELINUX
 #include <selinux/selinux.h>
 #endif
@@ -641,6 +645,15 @@ socket_defined(const socket_descriptor_t sd)
 #if 0
 #undef EPOLL
 #define EPOLL 0
+#endif
+
+/*
+ * Is kqueue available on this platform?
+ */
+#if defined(HAVE_KQUEUE) && defined(HAVE_SYS_EVENT_H)
+#define KQUEUE 1
+#else
+#define KQUEUE 0
 #endif
 
 /*
