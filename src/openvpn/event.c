@@ -682,6 +682,190 @@ ep_init(int *maxevents, unsigned int flags)
 }
 #endif /* EPOLL */
 
+#if KQUEUE
+
+struct kq_set
+{
+    struct event_set_functions func;
+    bool fast;
+    int kqfd;
+    int maxevents;
+    struct kevent *events;
+};
+
+static void
+kq_free(struct event_set *es)
+{
+    struct kq_set *kqs = (struct kq_set *) es;
+    close(kqs->kqfd);
+    free(kqs->events);
+    free(kqs);
+}
+
+static void
+kq_reset(struct event_set *es)
+{
+    const struct kq_set *kqs = (struct kq_set *) es;
+    ASSERT(kqs->fast);
+}
+
+static void
+kq_del(struct event_set *es, event_t event)
+{
+    struct kevent ev;
+    struct kq_set *kqs = (struct kq_set *) es;
+
+    dmsg(D_EVENT_WAIT, "KQ_DEL ev=%d", (int)event);
+
+    ASSERT(!kqs->fast);
+    CLEAR(ev);
+    EV_SET(&ev, event, EVFILT_READ|EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    kevent(kqs->kqfd, &ev, 1, NULL, 0, NULL);
+}
+
+static void
+kq_ctl(struct event_set *es, event_t event, unsigned int rwflags, void *arg)
+{
+    struct kq_set *kqs = (struct kq_set *) es;
+    struct kevent ev;
+    short filter;
+
+    CLEAR(ev);
+
+    filter = 0;
+    if(rwflags & EVENT_READ)
+    {
+        filter |= EVFILT_READ;
+    }
+    if(rwflags & EVENT_WRITE)
+    {
+        filter |= EVFILT_WRITE;
+    }
+
+    dmsg(D_EVENT_WAIT, "KQ_CTL fd=%d rwflags=0x%04x ev=0x%08x arg=" ptr_format,
+         (int)event,
+         rwflags,
+         (unsigned int)filter,
+         (ptr_type)arg);
+
+
+    if( kqs->fast ) 
+    {
+        EV_SET(&ev, event, filter, EV_ADD, 0, 0, arg);
+        if(kevent(kqs->kqfd, &ev, 1, NULL, 0, NULL) < 0) 
+        {
+            msg(M_ERR, "EVENT: kevent KV_ADD failed, sd=%d", (int)event);
+        }
+    }
+    else 
+    {
+        if( ! (rwflags & EVENT_READ)) 
+        {
+            EV_SET(&ev, event, EVENT_READ, EV_DELETE, 0, 0, NULL);
+            kevent(kqs->kqfd, &ev, 1, NULL, 0, NULL);
+        }
+
+        if( ! (rwflags & EVENT_WRITE)) 
+        {
+            EV_SET(&ev, event, EVENT_WRITE, EV_DELETE, 0, 0, NULL);
+            kevent(kqs->kqfd, &ev, 1, NULL, 0, NULL);
+        }
+
+        EV_SET(&ev, event, filter, EV_ADD, 0, 0, arg);
+        if(kevent(kqs->kqfd, &ev, 1, NULL, 0, NULL) < 0) 
+        {
+            msg(M_ERR, "EVENT: kevent KV_ADD failed, sd=%d", (int)event);
+        }
+    }
+}
+
+
+static int
+kq_wait(struct event_set *es, const struct timeval *tv, struct event_set_return *out, int outlen)
+{
+    struct kq_set *kqs = (struct kq_set *) es;
+    int stat;
+    struct timespec timeout = { tv->tv_sec, tv->tv_usec * 1000 };
+
+    if (outlen > kqs->maxevents)
+    {
+        outlen = kqs->maxevents;
+    }
+
+    stat = kevent(kqs->kqfd, NULL, 0, kqs->events, outlen, &timeout);
+    ASSERT(stat <= outlen);
+
+    if (stat > 0)
+    {
+        int i;
+        const struct kevent *ev = kqs->events;
+        struct event_set_return *esr = out;
+        for (i = 0; i < stat; ++i)
+        {
+            esr->rwflags = 0;
+            if ( ev->filter == EVFILT_READ || (ev->flags & EV_EOF) )
+            {
+                esr->rwflags |= EVENT_READ;
+            }
+            else if (ev->filter == EVFILT_WRITE)
+            {
+                esr->rwflags |= EVENT_WRITE;
+            }
+            esr->arg = ev->udata;
+            dmsg(D_EVENT_WAIT, "KQ_WAIT[%d] rwflags=0x%04x ev=0x%08x arg=" ptr_format,
+                 (int)ev->ident, esr->rwflags, ev->filter, (ptr_type)ev->udata);
+            ++ev;
+            ++esr;
+        }
+    }
+    return stat;
+}
+
+static struct event_set *
+kq_init(int *maxevents, unsigned int flags)
+{
+    struct kq_set *kqs;
+    int fd;
+
+    dmsg(D_EVENT_WAIT, "KQ_INIT maxevents=%d flags=0x%08x", *maxevents, flags);
+
+    /* open kqueue file descriptor */
+    fd = kqueue();
+    if(fd < 0)
+    {
+        return NULL;
+    }
+
+    set_cloexec(fd);
+
+    ALLOC_OBJ_CLEAR(kqs, struct kq_set);
+
+    /* set dispatch functions */
+    kqs->func.free = kq_free;
+    kqs->func.reset = kq_reset;
+    kqs->func.del = kq_del;
+    kqs->func.ctl = kq_ctl;
+    kqs->func.wait = kq_wait;
+
+    /* fast method ("sort of") corresponds to kqueue one-shot */
+    if (flags & EVENT_METHOD_FAST)
+    {
+        kqs->fast = true;
+    }
+
+    /* allocate space for kevent return */
+    ASSERT(*maxevents > 0);
+    kqs->maxevents = *maxevents;
+    ALLOC_ARRAY_CLEAR(kqs->events, struct kevent, kqs->maxevents);
+
+    /* set kqueue control fd */
+    kqs->kqfd = fd;
+
+    return (struct event_set *) kqs;
+
+}
+#endif
+
 #if POLL
 
 struct po_set
@@ -1121,6 +1305,9 @@ event_set_init_simple(int *maxevents, unsigned int flags)
     struct event_set *ret = NULL;
 #ifdef _WIN32
     ret = we_init(maxevents, flags);
+#elif KQUEUE
+    ret = kq_init(maxevents, flags);
+
 #elif POLL && SELECT
 #if 0 /* Define to 1 if EVENT_METHOD_US_TIMEOUT should cause select to be favored over poll */
     if (flags & EVENT_METHOD_US_TIMEOUT)
@@ -1169,7 +1356,14 @@ event_set_init_scalable(int *maxevents, unsigned int flags)
         msg(M_WARN, "Note: sys_epoll API is unavailable, falling back to poll/select API");
         ret = event_set_init_simple(maxevents, flags);
     }
-#else  /* if EPOLL */
+#elif KQUEUE
+    ret = kq_init(maxevents, flags);
+    if (!ret)
+    {
+        msg(M_WARN, "Note: sys_kqueue API is unavailable, falling back to poll/select API");
+        ret = event_set_init_simple(maxevents, flags);
+    }
+#else  /* if EPOLL, KQUEUE */
     ret = event_set_init_simple(maxevents, flags);
 #endif
     ASSERT(ret);
