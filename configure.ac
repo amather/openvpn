@@ -441,7 +441,7 @@ AC_CHECK_HEADERS([ \
 	unistd.h signal.h libgen.h stropts.h \
 	syslog.h pwd.h grp.h \
 	sys/sockio.h sys/uio.h linux/sockios.h \
-	linux/types.h sys/poll.h sys/epoll.h err.h \
+	linux/types.h sys/poll.h sys/epoll.h sys/event.h err.h \
 ])
 
 SOCKET_INCLUDES="
@@ -658,7 +658,7 @@ AC_CHECK_FUNCS([ \
 	ctime memset vsnprintf strdup \
 	setsid chdir putenv getpeername unlink \
 	chsize ftruncate execve getpeereid umask basename dirname access \
-	epoll_create \
+	epoll_create kqueue \
 ])
 
 AC_CHECK_LIB(
